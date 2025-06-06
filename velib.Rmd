@@ -1,0 +1,284 @@
+---
+title: "Velib-2014"
+author: "Matias BOTTARINI"
+date: "2025-06-05"
+output: pdf_document
+always_allow_html: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Vélib data
+
+```{r}
+data <- get(load('velib.Rdata'))
+img_height = 600
+img_width = 800
+```
+## EDA
+For each of the 1189 stations we have the GPS position, bonus (integer) and 181 variables on each station. We think that the 181 variables are the hourly states on each station. The state goes from 0 to 1, so we think that maybe it is the availability of bikes in the station.
+
+Here the summary of the first 10 stations.
+```{r}
+Xsum = t(data[["data"]])
+summary(Xsum[,1:10])
+```
+Let's plot the hourly data for station 1. We can see that during the week, the availability of bikes are 0 when we are close to the weekends (first 24h) and last 48 h, and also at the end of the days (evenings) during week days.
+
+```{r}
+library(lubridate)
+library(ggplot2)
+png(width = img_width, height = img_height,'station-19117.png')
+h = seq(ymd_h("2014-08-31-11"), ymd_h("2014-09-07-23"), by = "hours")
+
+df = as.data.frame(Xsum)
+ggplot(data=df, aes(x=h, y=`19117`)) + 
+  labs (y = "19117 capacity") +
+  geom_line() + 
+  scale_x_datetime(date_breaks = "1 day", date_labels = "%a")
+dev.off()
+```
+
+Let's have a look at the GPS location of each Velib station. We can see that all are instlaled in Paris.
+```{r}
+#install.packages("leaflet")
+library(leaflet)
+palette = colorFactor("RdYlBu", domain = NULL)
+leaflet(data[["position"]]) %>% addTiles() %>%
+addCircleMarkers(radius = 3,
+stroke = FALSE, fillOpacity = 0.9)
+```
+
+## Data visualization (PCA)
+
+Let's use PCA on the data. We observe that after component 19 we have more than 90% of the information.
+
+```{r}
+X =data[["data"]]
+pca = princomp(X)
+summary(pca)
+```
+
+By observing the screeplot we could select the two first components for representing most of the information.
+```{r}
+screeplot(pca)
+```
+
+```{r}
+par(mfrow=c(1,2))
+biplot(pca,col=c(1,0))
+biplot(pca,col=c(0,2))
+```
+As we can see with PCA is difficult to clearly visualize the name of the variables. However, we think that the stations following on the right-hand side of the `Comp.1` they are going to be more solicited. As the variables are the hourly values, maybe we should think about plotting them as a TimeSeries once we have done the clustering.
+
+
+## Apply HC
+
+On the hourly loading data we apply HC.
+```{r}
+gps = as.matrix(data[["position"]])
+dX = dist(X)
+```
+
+We compare all the distance methods
+```{r}
+hc.compX = hclust(dX,method='complete')
+hc.singleX = hclust(dX,method='single')
+hc.centroidX = hclust(dX,method='centroid')
+hc.wardX = hclust(dX,method='ward.D2')
+```
+
+We observe that the complete and the ward distances give balanced hierarchies. Particularly for complete and ward, we select $k=4$ as it is the largest gap.
+```{r}
+plot(hc.compX)
+plot(hc.singleX)
+plot(hc.centroidX)
+plot(hc.wardX)
+```
+
+We can see that the division is made along the river and where the different areas are separated by its proximity.
+
+```{r}
+library(leaflet)
+plot_map <- function(cluster_obj)
+{
+  palette = colorFactor("RdYlBu", domain = NULL)
+  leaflet(data[["position"]]) %>% addTiles() %>%
+  addCircleMarkers(radius = 3,
+                   color = palette(cluster_obj),
+                   stroke = FALSE, fillOpacity = 0.9) %>%
+    addLegend(colors = palette(sort(unique(cluster_obj))), labels = sort(unique(cluster_obj)), position = "bottomleft")
+}
+```
+
+```{r}
+clustersX = cutree(hc.wardX, k = 4) 
+#install.packages("leaflet")
+plot_map(clustersX)
+```
+
+## Apply k-means
+
+By applying k-means to the hourly loads by station, we select $k=4$ on the screeplot. 
+
+```{r}
+K.max = 15
+J = rep(NA,K.max)
+for (k in 1:K.max){
+  out = kmeans(X,k,nstart=10) # nstart=10 permits to initialise evaluating between 10 random points.
+  J[k] = out$betweenss / out$totss
+}
+plot(J,type='b')
+```
+We can decide to take $k=4$ as the number of clusters.
+
+We are going to plot the mean of the station's load for each cluster, this could be understood as the average usage for the stations associated with its cluster number.
+
+```{r}
+library(tidyverse)
+plot_clusters <- function(km.clus_obj) 
+{
+  cluster_names = sort(unique(km.clus_obj$cluster))
+  ccol = palette(cluster_names)
+
+  df = data.frame(t(km.clus_obj$centers))
+  colnames(df) <- cluster_names
+
+  # treat df to ease plotting
+dd <- df %>%
+  mutate(x_time = h) %>%
+  pivot_longer(cols = cluster_names, names_to = "cluster", values_to = "bike station capacity")
+
+ggplot(data = dd, aes(x = x_time, y = `bike station capacity`, colour = cluster)) +
+  ylim(c(0,1)) +
+  geom_line(lwd = 1) +
+  scale_colour_manual(values = ccol) +
+  scale_x_datetime(date_breaks = "1 day", date_labels = "%a") + 
+  theme(panel.background = element_rect(fill = "grey"))
+}
+```
+
+
+```{r}
+png(width = img_width, height = img_height,'4-cluster-means.png')
+set.seed(666)
+km.clus = kmeans(X,4)
+plot_clusters(km.clus)
+dev.off()
+```
+When plotting the cluster means we observe that on:
+
+- *cluster 1*: During the **week days** the stations are full at noon during the week days, this means that the stations are close to **business district**. The stations are empty at midnight. During the **weekend** the use is less abrupt. We can identify it in the map as the **city center** in `red`.
+
+- *cluster 2*: During **week days**, it can be seen as the opposite of cluster 1. They are full at midnight and empty at noon, people leave their houses in the morning and start taking bikes. In the evening they come back home and the bike stations start to fill up. We can identify it in the map as the **residential areas** in `orange`.
+During the **weekend** the peaks are delayed as people come back home late at night.
+
+- *cluster 3*: the stations are most of the time full with peaks at midnight and valleys at noon. They follow the *cluster 2* trend and its trend is steady even during the weekends. This means that this cluster is a **mix of a residential area and a commercial area** in `cyan`.
+
+- *cluster 4*: the stations are most of the time empty, so we can say that these stations are rarely refilled and mostly refilled in the morning very soon, from midnight to 6 am. During the weekends they are mostly empty. This behaviour invites to think that these stations are mostly for consuming bikes and rarely as destination and they are refilled very soon in the morning, probably by Velib workers. You can find them in `dark blue` on the map.
+
+Then, we plot the stations classified by cluster on the map, we see that the stations are mixed all-around the city.
+
+```{r}
+plot_map(km.clus$cluster)
+```
+We obtain very similar results to the HC with ward distance and $k=4$.
+
+## PCA + k-means
+If we plot the 4 clusters projected on the two main component data we obtain the following plot.
+
+```{r}
+#install.packages("ggbiplot")
+library(ggbiplot)
+arrow_col = "black"
+pca_plot <- ggbiplot(pca, 
+         obs.scale = 1, var.scale = 1, 
+         varname.size = 6,
+         groups = km.clus$cluster,
+         varname.adjust = 1.25,
+         varname.color = arrow_col,
+         choices = 1:2, # components 1 and 2
+         ellipse = T, circle = F) 
+pca_plot
+```
+
+We observe that the 2 main components project in a clear way the 4 clusters, creating a squared shape divided in 4 parts of almost the same size. Remark that that cluster 1 (top) and 2 (bottom), corresponding to city center and residential areas respectively, are opposite in the graph. 
+The variables vectors are all of the same length and they have an spectrum that sweeps the 4th and 1st quadrants of the graph. Each variable vector correspond to an hour of the day, we assume that weekdays and weekend hours are different as they shown different behaviours.
+We know that the clusters are going to be assinged propotionally to the direction of the arrows, i.e. if an arrow is pointing to a cluster (positively related), during this hours the stations are going to be filled (bikes arriving to these stations). Inversely, if an arrow is opposite to the hour, the bike stations are going to be emptied (bikes departing from these stations). 
+
+However, this plot is not yet clear enough.
+Let's plot for a given day, monday (day = 1), the hours associated with noon and midnight.
+Also, let's change the color of the hourly variables (arrows) to better show what happens at **noon** and at **midnight** for each cluster.
+
+We have created a function to substitute the colors of the arrows and labels on the `ggbiplot` object.
+
+```{r}
+biplot_arrows <- function(ggbiplot_obj, day_to_plot, from_hours, to_hours, col_vec)
+{
+  g <- ggplot_build(ggbiplot_obj)
+  # change the colour of the arrows according to its hour
+  if ( length(from_hours) == length(to_hours) 
+       & length(from_hours) == length(col_vec) ) {
+  
+    for (i in 1:length(from_hours)) {
+      # change to new colour
+    cond = (hour(h) >= from_hours[i] & hour(h) <= to_hours[i])
+    morning = g[["data"]][[2]][["colour"]][cond]
+    mor_col = col_vec[i]
+    # replace arrows
+    g[["data"]][[2]][["colour"]][cond] <- replace(morning, morning==arrow_col,mor_col)
+    # replace arrow labels
+    morning = g[["data"]][[4]][["colour"]][cond]
+    g[["data"]][[4]][["colour"]][cond] <- replace(morning, morning==arrow_col,mor_col)
+    }
+  # plot only variable arrows from day = 1
+  cond = day(h) == day_to_plot # condition vector on time
+  g$data[[2]] <- g$data[[2]][cond,] 
+  g$data[[4]] <- g$data[[4]][cond,]
+  
+  # Repackage and plot
+  plot(ggplot_gtable(g))
+  }
+  else {
+    stop("from_hours and to_hours and col_vec vectors must have the same length")
+  }
+}
+```
+
+For a weekday, the biplot looks like this.
+```{r}
+png(width = img_width, height = img_height, "pca-circle.png")
+VAR_DAY = 1 # monday = 1, sunday = 7
+biplot_arrows(ggbiplot_obj = pca_plot,
+              day_to_plot = VAR_DAY,
+              from_hours = c(10, 22),
+              to_hours = c(13, 24),
+              col_vec = c("red","yellow")
+              )
+dev.off()
+```
+We observe that at **noon** (10h-13h) (red colour), the stations in cluster 1 (city center) are a going to be a destination (full with bikes).
+We observe that at **midnight** (22h-24h) (yellow colour), the stations in cluster 2 and 3 are going to be a destination.
+
+For a weekend, we plot aswell the same hours
+```{r}
+VAR_DAY = 6 # monday = 1, sunday = 7
+biplot_arrows(ggbiplot_obj = pca_plot,
+              day_to_plot = VAR_DAY,
+              from_hours = c(10, 22),
+              to_hours = c(13, 24),
+              col_vec = c("red","yellow")
+              )
+```
+During saturday (weekend) the noon and midnight hour vector change and are assigned to cluster 3, which is the mixed one and also the one that a higher use during the weekend (see TimeSeries plot on Apply k-means section).
+
+## Summary
+We have used PCA to reduce the dimension to two main components that explain almost half of the information and to obtain a visualization. We observed that with 19 components we could explain 90% of the information contained in the hourly bike use.
+
+We have used HC and k-means to cluster 4 groups depending on the loads of the bike stations. 
+
+We have combined the clustering with PCA to show the effect of each variable on the clustering. We have modified the biplot graph to better show the relationship between variables and clustering attribution.
+
+We have plotted the cluster means (mean average capacity) of each bike station to better understand its usage during a week.
